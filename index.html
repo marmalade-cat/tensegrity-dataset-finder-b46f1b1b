@@ -1,0 +1,116 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>Tensegrity Dataset Finder</title>
+  <style>
+    body{font-family:system-ui,Segoe UI,Arial;margin:18px;color:#222}
+    input{width:60%}button{margin-left:8px}
+    pre{background:#f6f6f8;padding:10px;border-radius:6px;overflow:auto}
+    .item{margin:8px 0;padding:8px;border:1px solid #e3e3e6;border-radius:6px}
+  </style>
+</head>
+<body>
+  <h2>Tensegrity Dataset Finder — prototype</h2>
+  <p>Paste a published-article URL (Nature Comm. or similar). The page and its immediate links will be fetched client-side. CORS may block some requests; results show what was reachable.</p>
+  <div>
+    <input id="url" placeholder="https://...">
+    <button id="scan">Scan</button>
+  </div>
+  <div id="log"></div>
+
+<script>
+async function log(msg){
+  const d=document.getElementById('log');
+  const p=document.createElement('div');p.innerHTML=msg;p.className='item';d.prepend(p);
+}
+
+function absolutize(base, href){ try{ return new URL(href, base).href }catch(e){return null} }
+
+async function fetchText(url){
+  try{
+    const r = await fetch(url, {mode:'cors'});
+    if(!r.ok) throw new Error('HTTP '+r.status);
+    return await r.text();
+  }catch(e){ throw new Error('Fetch failed: '+e.message) }
+}
+
+async function tryFetchBytes(url, limit=200000){
+  try{
+    const r = await fetch(url, {mode:'cors'});
+    if(!r.ok) throw new Error('HTTP '+r.status);
+    const reader = r.body && r.body.getReader();
+    if(!reader) return await r.text();
+    const chunks=[]; let received=0;
+    while(true){ const {done,value}=await reader.read(); if(done) break; received+=value.length; chunks.push(value); if(received>limit) break }
+    const blob = new Blob(chunks);
+    const txt = await blob.text();
+    return txt;
+  }catch(e){ throw new Error('Fetch failed: '+e.message) }
+}
+
+function extractLinks(html, base){
+  const doc = new DOMParser().parseFromString(html,'text/html');
+  const anchors = Array.from(doc.querySelectorAll('a[href]'));
+  return anchors.map(a=>absolutize(base,a.getAttribute('href'))).filter(u=>u);
+}
+
+function isDatasetLink(url){
+  if(!url) return false;
+  const low = url.split('?')[0].toLowerCase();
+  return low.endsWith('.csv') || low.endsWith('.tsv') || low.endsWith('.json') || /figshare\.com|zenodo\.org|github\.com|dryad\.org/.test(low);
+}
+
+function guessType(url){ const l=url.split('?')[0].toLowerCase(); if(l.endsWith('.csv')||l.endsWith('.tsv')) return 'csv/tsv'; if(l.endsWith('.json')) return 'json'; if(/figshare|zenodo|github|dryad/.test(l)) return 'repository'; return 'unknown'; }
+
+function parseCSVColumns(text){
+  const lines = text.split(/\r?\n/).filter(Boolean);
+  if(lines.length===0) return [];
+  const header = lines[0];
+  // simple split, won't handle quoted commas robustly
+  return header.split(/,|\t/).map(s=>s.trim()).slice(0,50);
+}
+
+function parseJSONKeys(text){
+  try{ const j=JSON.parse(text); if(Array.isArray(j) && j.length>0 && typeof j[0]==='object') return Object.keys(j[0]); if(typeof j==='object') return Object.keys(j); return []; }catch(e){ return []; }
+}
+
+document.getElementById('scan').addEventListener('click', async ()=>{
+  const url = document.getElementById('url').value.trim();
+  if(!url) return alert('Enter a URL');
+  log('Starting scan: '+url);
+  let html;
+  try{ html = await fetchText(url); log('Fetched main page'); }
+  catch(e){ log('Could not fetch main page: '+e.message); return }
+
+  const links = extractLinks(html, url);
+  log('Found '+links.length+' links on the page');
+  const candidates = [...new Set(links.filter(isDatasetLink))];
+  // also check if the main page itself is a dataset
+  if(isDatasetLink(url) && !candidates.includes(url)) candidates.unshift(url);
+  if(candidates.length===0) { log('No immediate dataset or repository links detected.'); return }
+  log('Detected '+candidates.length+' candidate dataset/repository links');
+
+  for(const u of candidates){
+    const type = guessType(u);
+    const container = document.createElement('div'); container.className='item';
+    container.innerHTML = `<strong>${u}</strong><div>Type: ${type}</div><div class="detail">Provenance: link-from-page</div>`;
+    document.getElementById('log').prepend(container);
+    if(type==='csv/tsv' || type==='json'){
+      try{
+        const txt = await tryFetchBytes(u,200000);
+        let cols=[];
+        if(type==='json') cols = parseJSONKeys(txt);
+        else cols = parseCSVColumns(txt);
+        const p = document.createElement('pre'); p.textContent = 'Estimated schema: ' + (cols.length?cols.join(', '):'(none or failed to parse)'); container.appendChild(p);
+      }catch(e){ const p=document.createElement('div'); p.textContent='Could not fetch file content: '+e.message; container.appendChild(p); }
+    } else if(type==='repository'){
+      const p=document.createElement('div'); p.textContent='Repository link detected. Click to open.'; container.appendChild(p);
+    }
+  }
+
+  log('Scan complete. CORS and remote policies may limit results.');
+});
+</script>
+</body>
+</html>
